@@ -1,74 +1,85 @@
-# mcp-bridge-go 🚀
+# mcp-bridge-go
 
-High-performance, lightweight self-hosted Model Context Protocol (MCP) SSE bridge server written in Go.  
-Replaces `mcp-bridge-cf` (Cloudflare Workers) to eliminate tier limits and cloud dependency.
+Self-hosted Model Context Protocol (MCP) bridge daemon written in Go.
+Provides Server-Sent Events (SSE) and JSON-RPC 2.0 transport for tool execution between local environments and browser extensions.
 
----
+## Architecture & Security
 
-## ✨ Features
+- Strictly binds to `127.0.0.1` by default. Binding to global addresses (`0.0.0.0`) is prohibited to prevent exposure without a secured reverse proxy.
+- Implements MCP specification `protocolVersion: 2025-03-26`.
+- Thread-safe in-memory room management for session isolation.
 
-- **Protocol Compatible**: 100% compatible with Model Context Protocol (MCP) JSON-RPC 2.0 and Server-Sent Events (SSE) specifications.
-- **Zero Cloud Cost**: Run on any VPS, Raspberry Pi, homelab, or local server.
-- **Ultra Lightweight & Fast**: Built with Go standard library and Gorilla WebSocket, with minimal memory footprint (< 15MB RAM).
-- **Multi-room Support**: Isolated rooms via `/new` or URL query `?room=<roomId>`.
-- **Automatic Multi-Platform Releases**: GitHub Actions CI builds binaries for Linux, macOS, and Windows (amd64 and arm64).
+## Endpoints
 
----
+- `GET /new`: Allocates an isolated room ID and generates WebSocket/SSE endpoints.
+- `GET /health?room=<room_id>`: Returns room status and count of active tools.
+- `GET /ws/extension?room=<room_id>`: WebSocket endpoint for extension communication.
+- `GET /mcp?room=<room_id>`: Server-Sent Events stream delivering endpoint metadata and keepalive heartbeats.
+- `POST /mcp?room=<room_id>`: JSON-RPC 2.0 endpoint (`initialize`, `tools/list`, `tools/call`, `ping`).
 
-## 📡 Endpoints
+## Installation on Linux
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` / `POST` | `/new` or `/mcp/new` | Generate a new isolated room ID with connection URLs |
-| `GET` | `/health?room=<roomId>` | Health status and connected tools count |
-| `GET` | `/ws/extension?room=<roomId>` | WebSocket connection for Chrome Extension |
-| `GET` | `/mcp?room=<roomId>` | Server-Sent Events (SSE) stream for MCP clients |
-| `POST` | `/mcp?room=<roomId>` | JSON-RPC 2.0 endpoint (`initialize`, `tools/list`, `tools/call`, `ping`) |
+### Quick Install via Release Tarball
 
----
-
-## 🛠️ Quick Start
-
-### 1. Download Pre-built Binary
-Download the binary for your OS and architecture from the [GitHub Releases](https://github.com/kelvinzer0/mcp-bridge-go/releases) page.
+Download and extract the pre-built Linux package for your architecture:
 
 ```bash
-# Example for Linux amd64
-tar -xvf mcp-bridge-go-linux-amd64.tar.gz
-./mcp-bridge-go -port 8080
+tar -xvf mcp-bridge-linux-amd64.tar.gz
+cd mcp-bridge-linux-amd64
+sudo ./install.sh
 ```
 
-### 2. Build from Source
+The installer performs the following actions:
+1. Installs binary to `/usr/local/bin/mcp-bridge`.
+2. Creates default configuration at `/etc/mcp-bridge/mcp-bridge.env`.
+3. Registers and starts the service under `systemd` (or `init.d` fallback).
+
+### Service Management
+
+Manage the service using standard Linux commands:
+
+```bash
+service mcp-bridge start
+service mcp-bridge stop
+service mcp-bridge restart
+service mcp-bridge status
+```
+
+Or via `systemctl`:
+
+```bash
+systemctl start mcp-bridge
+systemctl status mcp-bridge
+```
+
+### Configuration
+
+Edit `/etc/mcp-bridge/mcp-bridge.env`:
+
+```ini
+HOST=127.0.0.1
+PORT=8080
+```
+
+Restart the service after editing:
+
+```bash
+service mcp-bridge restart
+```
+
+### Uninstallation
+
+```bash
+sudo ./uninstall.sh
+```
+
+## Building from Source
+
+Requirements: Go 1.22+
+
 ```bash
 git clone https://github.com/kelvinzer0/mcp-bridge-go.git
 cd mcp-bridge-go
-go build -o mcp-bridge-go .
-./mcp-bridge-go -port 8080
+go build -trimpath -ldflags="-s -w" -o bin/mcp-bridge ./cmd/mcp-bridge
+./bin/mcp-bridge -host 127.0.0.1 -port 8080
 ```
-
-### 3. Run with Docker
-```bash
-docker build -t mcp-bridge-go .
-docker run -d -p 8080:8080 --name mcp-bridge mcp-bridge-go
-```
-
----
-
-## ⚙️ Configuration & Flags
-
-| Flag | Env Var | Default | Description |
-|---|---|---|---|
-| `-port` | `PORT` | `8080` | Port to listen on |
-| `-host` | - | `0.0.0.0` | Host IP to bind to |
-
----
-
-## 📦 CI / CD Automated Releases
-
-Releases are automatically triggered when a Git tag starting with `v*` (e.g., `v1.0.0`) is pushed to GitHub:
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-GitHub Actions will automatically cross-compile and attach release archives + SHA256 checksums to the release.

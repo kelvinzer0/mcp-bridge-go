@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"crypto/rand"
@@ -12,25 +12,27 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/kelvinzer0/mcp-bridge-go/internal/protocol"
+	"github.com/kelvinzer0/mcp-bridge-go/internal/room"
 )
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  65536,
 	WriteBufferSize: 65536,
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins for extension and CORS
+		return true
 	},
 }
 
-type Server struct {
-	hub *Hub
+type Handler struct {
+	hub *room.Hub
 }
 
-func NewServer(hub *Hub) *Server {
-	return &Server{hub: hub}
+func NewHandler(hub *room.Hub) *Handler {
+	return &Handler{hub: hub}
 }
 
-func (s *Server) getBaseURLs(r *http.Request) (httpBase, wsBase string) {
+func (h *Handler) getBaseURLs(r *http.Request) (httpBase, wsBase string) {
 	proto := "http"
 	wsProto := "ws"
 	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
@@ -54,11 +56,11 @@ func generateRandomID(length int) string {
 	return hex.EncodeToString(bytes)[:length]
 }
 
-func (s *Server) HandleNew(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleNew(w http.ResponseWriter, r *http.Request) {
 	roomID := generateRandomID(8)
-	_ = s.hub.GetOrCreateRoom(roomID)
+	_ = h.hub.GetOrCreate(roomID)
 
-	httpBase, wsBase := s.getBaseURLs(r)
+	httpBase, wsBase := h.getBaseURLs(r)
 
 	resp := map[string]string{
 		"room":          roomID,
@@ -71,20 +73,20 @@ func (s *Server) HandleNew(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	roomID := r.URL.Query().Get("room")
 	if roomID == "" {
 		roomID = "default"
 	}
 
-	room := s.hub.GetRoom(roomID)
+	rInstance := h.hub.Get(roomID)
 	isConnected := false
 	toolsRegistered := 0
 	toolNames := []string{}
 
-	if room != nil {
-		isConnected = room.IsConnected()
-		tools := room.GetTools()
+	if rInstance != nil {
+		isConnected = rInstance.IsConnected()
+		tools := rInstance.GetTools()
 		toolsRegistered = len(tools)
 		for _, t := range tools {
 			toolNames = append(toolNames, t.Name)
@@ -100,13 +102,13 @@ func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) HandleWSExtension(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleWSExtension(w http.ResponseWriter, r *http.Request) {
 	roomID := r.URL.Query().Get("room")
 	if roomID == "" {
 		roomID = "default"
 	}
 
-	room := s.hub.GetOrCreateRoom(roomID)
+	rInstance := h.hub.GetOrCreate(roomID)
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -114,15 +116,14 @@ func (s *Server) HandleWSExtension(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	room.SetWS(conn)
+	rInstance.SetWS(conn)
 	defer func() {
-		room.ClearWS(conn)
+		rInstance.ClearWS(conn)
 		_ = conn.Close()
 	}()
 
 	log.Printf("[WS] Extension connected to room '%s'", roomID)
 
-	// Heartbeat goroutine
 	done := make(chan struct{})
 	defer close(done)
 
@@ -132,7 +133,7 @@ func (s *Server) HandleWSExtension(w http.ResponseWriter, r *http.Request) {
 		for {
 			select {
 			case <-ticker.C:
-				if err := room.SendWSJSON(map[string]string{"type": "ping"}); err != nil {
+				if err := rInstance.SendWSJSON(map[string]string{"type": "ping"}); err != nil {
 					return
 				}
 			case <-done:
@@ -150,7 +151,7 @@ func (s *Server) HandleWSExtension(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		var msg ExtensionMessage
+		var msg protocol.ExtensionMessage
 		if err := json.Unmarshal(message, &msg); err != nil {
 			continue
 		}
@@ -158,44 +159,44 @@ func (s *Server) HandleWSExtension(w http.ResponseWriter, r *http.Request) {
 		switch msg.Type {
 		case "registerTools":
 			if len(msg.Tools) > 0 {
-				room.RegisterTools(msg.Tools)
+				rInstance.RegisterTools(msg.Tools)
 				log.Printf("[Room %s] Registered %d tools", roomID, len(msg.Tools))
 			}
 		case "unregisterTools":
 			if len(msg.Names) > 0 {
-				room.UnregisterTools(msg.Names)
+				rInstance.UnregisterTools(msg.Names)
 				log.Printf("[Room %s] Unregistered %d tools", roomID, len(msg.Names))
 			}
 		case "toolResult":
 			if msg.CallID != "" && msg.Result != nil {
-				room.HandleToolResult(msg.CallID, msg.Result)
+				rInstance.HandleToolResult(msg.CallID, msg.Result)
 			}
 		case "pong":
-			// extension heartbeat response
+			// extension heartbeat
 		}
 	}
 
 	log.Printf("[WS] Extension disconnected from room '%s'", roomID)
 }
 
-func (s *Server) HandleMCP(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleMCP(w http.ResponseWriter, r *http.Request) {
 	roomID := r.URL.Query().Get("room")
 	if roomID == "" {
 		roomID = "default"
 	}
-	room := s.hub.GetOrCreateRoom(roomID)
+	rInstance := h.hub.GetOrCreate(roomID)
 
 	switch r.Method {
 	case http.MethodGet:
-		s.handleMCPSSE(w, r, room, roomID)
+		h.handleMCPSSE(w, r, rInstance, roomID)
 	case http.MethodPost:
-		s.handleMCPRPC(w, r, room)
+		h.handleMCPRPC(w, r, rInstance)
 	default:
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-func (s *Server) handleMCPSSE(w http.ResponseWriter, r *http.Request, room *Room, roomID string) {
+func (h *Handler) handleMCPSSE(w http.ResponseWriter, r *http.Request, rInstance *room.Room, roomID string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
@@ -207,12 +208,10 @@ func (s *Server) handleMCPSSE(w http.ResponseWriter, r *http.Request, room *Room
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	// Send initial endpoint event
 	endpointData := fmt.Sprintf("/mcp?room=%s", roomID)
 	_, _ = fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", endpointData)
 	flusher.Flush()
 
-	// Keepalive loop
 	ticker := time.NewTicker(25 * time.Second)
 	defer ticker.Stop()
 
@@ -230,36 +229,35 @@ func (s *Server) handleMCPSSE(w http.ResponseWriter, r *http.Request, room *Room
 	}
 }
 
-func (s *Server) handleMCPRPC(w http.ResponseWriter, r *http.Request, room *Room) {
+func (h *Handler) handleMCPRPC(w http.ResponseWriter, r *http.Request, rInstance *room.Room) {
 	w.Header().Set("Content-Type", "application/json")
 
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		_ = json.NewEncoder(w).Encode(JsonRpcResponse{
+		_ = json.NewEncoder(w).Encode(protocol.JsonRpcResponse{
 			Jsonrpc: "2.0",
 			ID:      nil,
-			Error:   &JsonRpcError{Code: -32700, Message: "Parse error"},
+			Error:   &protocol.JsonRpcError{Code: -32700, Message: "Parse error"},
 		})
 		return
 	}
 
-	var req JsonRpcRequest
+	var req protocol.JsonRpcRequest
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
-		_ = json.NewEncoder(w).Encode(JsonRpcResponse{
+		_ = json.NewEncoder(w).Encode(protocol.JsonRpcResponse{
 			Jsonrpc: "2.0",
 			ID:      nil,
-			Error:   &JsonRpcError{Code: -32700, Message: "Parse error"},
+			Error:   &protocol.JsonRpcError{Code: -32700, Message: "Parse error"},
 		})
 		return
 	}
 
-	// Notifications have no id
 	if req.ID == nil {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 
-	resp := JsonRpcResponse{
+	resp := protocol.JsonRpcResponse{
 		Jsonrpc: "2.0",
 		ID:      req.ID,
 	}
@@ -274,13 +272,13 @@ func (s *Server) handleMCPRPC(w http.ResponseWriter, r *http.Request, room *Room
 				},
 			},
 			"serverInfo": map[string]string{
-				"name":    "mcp-bridge-go",
-				"version": "0.1.0",
+				"name":    "mcp-bridge",
+				"version": "1.0.0",
 			},
 		}
 
 	case "tools/list":
-		tools := room.GetTools()
+		tools := rInstance.GetTools()
 		toolList := make([]map[string]interface{}, 0, len(tools))
 		for _, t := range tools {
 			schema := t.InputSchema
@@ -307,17 +305,17 @@ func (s *Server) handleMCPRPC(w http.ResponseWriter, r *http.Request, room *Room
 			args = make(map[string]interface{})
 		}
 
-		if toolName == "" || !room.HasTool(toolName) {
-			resp.Error = &JsonRpcError{
+		if toolName == "" || !rInstance.HasTool(toolName) {
+			resp.Error = &protocol.JsonRpcError{
 				Code:    -32602,
 				Message: fmt.Sprintf("Unknown tool: %s", toolName),
 			}
 			break
 		}
 
-		if !room.IsConnected() {
-			resp.Result = ToolResult{
-				Content: []ToolContent{
+		if !rInstance.IsConnected() {
+			resp.Result = protocol.ToolResult{
+				Content: []protocol.ToolContent{
 					{Type: "text", Text: "Extension not connected"},
 				},
 				IsError: true,
@@ -325,10 +323,10 @@ func (s *Server) handleMCPRPC(w http.ResponseWriter, r *http.Request, room *Room
 			break
 		}
 
-		res, err := room.CallTool(r.Context(), toolName, args, 60*time.Second)
+		res, err := rInstance.CallTool(r.Context(), toolName, args, 60*time.Second)
 		if err != nil {
-			resp.Result = ToolResult{
-				Content: []ToolContent{
+			resp.Result = protocol.ToolResult{
+				Content: []protocol.ToolContent{
 					{Type: "text", Text: fmt.Sprintf("Error: %s", err.Error())},
 				},
 				IsError: true,
@@ -341,28 +339,11 @@ func (s *Server) handleMCPRPC(w http.ResponseWriter, r *http.Request, room *Room
 		resp.Result = map[string]interface{}{}
 
 	default:
-		resp.Error = &JsonRpcError{
+		resp.Error = &protocol.JsonRpcError{
 			Code:    -32601,
 			Message: fmt.Sprintf("Method not found: %s", req.Method),
 		}
 	}
 
 	_ = json.NewEncoder(w).Encode(resp)
-}
-
-func CorsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD")
-		w.Header().Set("Access-Control-Allow-Headers", "*")
-		w.Header().Set("Access-Control-Expose-Headers", "*")
-		w.Header().Set("Access-Control-Max-Age", "86400")
-
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
 }

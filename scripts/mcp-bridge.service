@@ -1,0 +1,15 @@
+[Unit]
+Description=MCP Bridge Server (Go)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/mcp-bridge/mcp-bridge.env
+ExecStart=/usr/local/bin/mcp-bridge -host ${HOST} -port ${PORT}
+Restart=always
+RestartSec=5s
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

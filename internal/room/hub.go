@@ -1,4 +1,4 @@
-package main
+package room
 
 import (
 	"sync"
@@ -15,7 +15,7 @@ func NewHub() *Hub {
 	}
 }
 
-func (h *Hub) GetOrCreateRoom(id string) *Room {
+func (h *Hub) GetOrCreate(id string) *Room {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -23,12 +23,12 @@ func (h *Hub) GetOrCreateRoom(id string) *Room {
 		return r
 	}
 
-	r := NewRoom(id)
+	r := New(id)
 	h.rooms[id] = r
 	return r
 }
 
-func (h *Hub) GetRoom(id string) *Room {
+func (h *Hub) Get(id string) *Room {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.rooms[id]

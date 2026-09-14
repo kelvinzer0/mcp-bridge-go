@@ -1,4 +1,4 @@
-package main
+package room
 
 import (
 	"context"
@@ -9,22 +9,23 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/kelvinzer0/mcp-bridge-go/internal/protocol"
 )
 
 type Room struct {
 	ID           string
 	mu           sync.RWMutex
-	tools        map[string]ToolDefinition
+	tools        map[string]protocol.ToolDefinition
 	ws           *websocket.Conn
 	wsMu         sync.Mutex
-	pendingCalls map[string]chan *ToolResult
+	pendingCalls map[string]chan *protocol.ToolResult
 }
 
-func NewRoom(id string) *Room {
+func New(id string) *Room {
 	return &Room{
 		ID:           id,
-		tools:        make(map[string]ToolDefinition),
-		pendingCalls: make(map[string]chan *ToolResult),
+		tools:        make(map[string]protocol.ToolDefinition),
+		pendingCalls: make(map[string]chan *protocol.ToolResult),
 	}
 }
 
@@ -32,7 +33,6 @@ func (r *Room) SetWS(conn *websocket.Conn) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Close old connection if present
 	if r.ws != nil {
 		_ = r.ws.Close()
 	}
@@ -43,13 +43,10 @@ func (r *Room) ClearWS(conn *websocket.Conn) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Only clear if it matches the current conn
 	if r.ws == conn {
 		r.ws = nil
-		// Clear tools on extension disconnect (matching mcp-bridge-cf behavior)
-		r.tools = make(map[string]ToolDefinition)
+		r.tools = make(map[string]protocol.ToolDefinition)
 
-		// Abort any waiting pending calls
 		for id, ch := range r.pendingCalls {
 			close(ch)
 			delete(r.pendingCalls, id)
@@ -63,7 +60,7 @@ func (r *Room) IsConnected() bool {
 	return r.ws != nil
 }
 
-func (r *Room) RegisterTools(tools []ToolDefinition) {
+func (r *Room) RegisterTools(tools []protocol.ToolDefinition) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, t := range tools {
@@ -79,10 +76,10 @@ func (r *Room) UnregisterTools(names []string) {
 	}
 }
 
-func (r *Room) GetTools() []ToolDefinition {
+func (r *Room) GetTools() []protocol.ToolDefinition {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	list := make([]ToolDefinition, 0, len(r.tools))
+	list := make([]protocol.ToolDefinition, 0, len(r.tools))
 	for _, t := range r.tools {
 		list = append(list, t)
 	}
@@ -112,13 +109,13 @@ func (r *Room) SendWSJSON(v interface{}) error {
 	return conn.WriteJSON(v)
 }
 
-func (r *Room) CallTool(ctx context.Context, name string, args map[string]interface{}, timeout time.Duration) (*ToolResult, error) {
+func (r *Room) CallTool(ctx context.Context, name string, args map[string]interface{}, timeout time.Duration) (*protocol.ToolResult, error) {
 	if !r.IsConnected() {
 		return nil, errors.New("extension not connected")
 	}
 
 	callID := uuid.NewString()
-	resChan := make(chan *ToolResult, 1)
+	resChan := make(chan *protocol.ToolResult, 1)
 
 	r.mu.Lock()
 	r.pendingCalls[callID] = resChan
@@ -130,7 +127,7 @@ func (r *Room) CallTool(ctx context.Context, name string, args map[string]interf
 		r.mu.Unlock()
 	}()
 
-	msg := CallToolMessage{
+	msg := protocol.CallToolMessage{
 		Type:   "callTool",
 		CallID: callID,
 		Name:   name,
@@ -138,7 +135,7 @@ func (r *Room) CallTool(ctx context.Context, name string, args map[string]interf
 	}
 
 	if err := r.SendWSJSON(msg); err != nil {
-		return nil, fmt.Errorf("failed to send callTool: %w", err)
+		return nil, fmt.Errorf("failed to dispatch tool call: %w", err)
 	}
 
 	select {
@@ -148,13 +145,13 @@ func (r *Room) CallTool(ctx context.Context, name string, args map[string]interf
 		}
 		return res, nil
 	case <-time.After(timeout):
-		return nil, fmt.Errorf("timeout: %s", name)
+		return nil, fmt.Errorf("timeout executing tool: %s", name)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
 
-func (r *Room) HandleToolResult(callID string, res *ToolResult) {
+func (r *Room) HandleToolResult(callID string, res *protocol.ToolResult) {
 	r.mu.RLock()
 	ch, exists := r.pendingCalls[callID]
 	r.mu.RUnlock()
